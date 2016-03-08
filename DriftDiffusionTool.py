@@ -7,8 +7,6 @@ import KDE_tool as KDE
 import EUgrid as Grid
 import aurespf.solvers as au
 from scipy.stats import norm
-from sklearn.neighbors import KernelDensity
-from sklearn.grid_search import GridSearchCV
 from matplotlib.pylab import *
 from scipy import stats
 from scipy.stats import norm
@@ -49,6 +47,7 @@ def calculatePCAweights(filename):
         weights_all[j, :] = PCA.get_xi_weight(h, j)
 
     return weights_all
+
 
 def detrendData(weights):
     """
@@ -546,7 +545,9 @@ def generate8YearMismatchData(filename,weights_monthly_all,weights_daily_all,wei
     np.save('approx_mismatch_generated'+'.npy',approx_mismatch)
     np.save(filename, epsilon)
 
+
 def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,weights_hourly_all,timelag=1,NumberOfComponents=1):
+
     # Data strucktues
     T = len(weights_hourly_all[0,:])
     a_h = np.zeros((NumberOfComponents,T))
@@ -586,6 +587,8 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
         min_values_h = Hourly_data['min']
         value_intervals_h = Hourly_data['interval']
 
+        numberOfkdes = len(Hourly_data['kde'])
+
         with open('daily_kde_full_k='+str(component+1)+'.pkl', 'rb') as f:
             Daily_data = pickle.load(f)
 
@@ -602,7 +605,6 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
         min_values_m = Monthly_data['min']
         value_intervals_m = Monthly_data['interval']
 
-
         # Begin to create generated values
         daily_amplitude = weights_daily_all[component,0]
         semi_monthly_amplitude = weights_monthly_all[component,0]
@@ -614,45 +616,46 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
         year = 0
         time_of_day = 0 # Since we use the real data values for hour 0, the generated data is
 
-        for hour in range(1,T):
+        # Setting the first element in the array to be equal to the data, undtill we reach the first valid point for timelag.
+        for hour in range(0,timelag):
+            a_h[component,hour] = weights_hourly_all[component,hour]
+            a_d[component,hour] = weights_daily_all[component,hour]
+            a_m[component,hour] = weights_monthly_all[component,hour]
 
-            #print time_of_day,'Time of day'
-            #print hour,'Hour'
-            # Keeping track on wat month and year we are in when generating data
-            if hour == hours_in_month[12*year+month]:
+        for hour in range(timelag,T):
+        # Keeping track on wat month and year we are in when generating data
+            if hour > hours_in_month[12*year+month]:
                 month += 1
 
             if month == 12:
                 month = 0
                 year += 1
+            # Setting the a_h value to the value of the data where we wish to start generating from.
+            a_h[component,hour] = weights_hourly_all[component,hour-timelag]
 
-            if hour % timelag == 0:
-                samples = np.vstack([np.repeat(weights_hourly_all[component,hour-1],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate)])
-                pdf = kdes_h[(24*month)+time_of_day].evaluate(samples)
+            for i in range(timelag):
 
-                if np.sum(pdf) == 0:
-                    print month
-                    print time_of_day
-                    print (24*month)+time_of_day
-                    print min_values_h[(24*month)+time_of_day]
-                    print max_values_h[(24*month)+time_of_day]
-                    print weights_hourly_all[component,hour-1]
-                    print 'Not guud'
+                h = ((24*month)+time_of_day+i)
+                if ((24*month)+time_of_day+i) >= numberOfkdes:
+                    h = 0 + ((24*month)+time_of_day+i)%numberOfkdes
 
-                drift = KDE.kramer_moyal_coeff(weights_hourly_all[component,hour-1], value_intervals_h[(24*month)+time_of_day,:], pdf, n=1, tau=1)
-                diffusion = KDE.kramer_moyal_coeff(weights_hourly_all[component,hour-1], value_intervals_h[(24*month)+time_of_day,:], pdf, n=2, tau=1)
+                samples = np.vstack([np.repeat(a_h[component,hour],samplerate), np.linspace(min_values_h[h], max_values_h[h], samplerate)])
+                pdf = kdes_h[h].evaluate(samples)
+
+
+                drift = KDE.kramer_moyal_coeff(a_h[component,hour], value_intervals_h[h,:], pdf, n=1, tau=1)
+                diffusion = KDE.kramer_moyal_coeff(a_h[component,hour], value_intervals_h[h,:], pdf, n=2, tau=1)
 
                 p = norm.rvs(loc=0, scale=1)
 
-                a_h[component,hour] = weights_hourly_all[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
+                hourly_amp = a_h[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
+                next_h = h+1
 
-                time_of_day += 1
-                if time_of_day == 24:
-                    time_of_day = 0
-
-                # Check if the new value is "legal"
-                samples = np.vstack([np.repeat(a_h[component,hour],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate)])
-                pdf = kdes_h[(24*month)+time_of_day].evaluate(samples)
+                if next_h >= numberOfkdes:
+                    next_h = 0 + ((24*month)+time_of_day+i+1)%numberOfkdes
+                # Check if the new value is "legal" in the next hour
+                samples = np.vstack([np.repeat(hourly_amp,samplerate), np.linspace(min_values_h[next_h], max_values_h[next_h], samplerate)])
+                pdf = kdes_h[next_h].evaluate(samples)
 
                 iteration = 0
                 if np.sum(pdf) == 0.0:
@@ -661,60 +664,33 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                         p = norm.rvs(loc=0, scale=1)
 
-                        a_h[component,hour] = weights_hourly_all[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
+                        hourly_amp = a_h[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                        samples = np.vstack([np.repeat(a_h[component,hour],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate)])
-                        pdf = kdes_h[(24*month)+time_of_day].evaluate(samples)
+                        samples = np.vstack([np.repeat(hourly_amp,samplerate), np.linspace(min_values_h[next_h], max_values_h[next_h], samplerate)])
+                        pdf = kdes_h[next_h].evaluate(samples)
 
                         iteration += 1
                         if iteration > 1000:
                             print('Too many iterations')
                             break
-            else:
-                    samples = np.vstack([np.repeat(a_h[component,hour-1],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate)])
-                    pdf = kdes_h[(24*month)+time_of_day].evaluate(samples)
+                # Updates the values in a_h, this is done 'timelag' times.
+                a_h[component,hour] = hourly_amp
 
-                    drift = KDE.kramer_moyal_coeff(a_h[component,hour-1], value_intervals_h[(24*month)+time_of_day,:], pdf, n=1, tau=1)
-                    diffusion = KDE.kramer_moyal_coeff(a_h[component,hour-1], value_intervals_h[(24*month)+time_of_day,:], pdf, n=2, tau=1)
+            # The next hour is a new tme of day.
+            time_of_day += 1
+            if time_of_day == 24:
+                time_of_day = 0
 
-                    p = norm.rvs(loc=0, scale=1)
-
-                    a_h[component,hour] = a_h[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    time_of_day += 1
-                    if time_of_day == 24:
-                        time_of_day = 0
-
-                    # Check if the new value is "legal"
-                    samples = np.vstack([np.repeat(a_h[component,hour],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate)])
-                    pdf = kdes_h[(24*month)+time_of_day].evaluate(samples)
-
-                    iteration = 0
-                    if np.sum(pdf) == 0.0:
-                        # print 'out', i
-                        while np.sum(pdf) == 0.0:
-
-                            p = norm.rvs(loc=0, scale=1)
-
-                            a_h[component,hour] = a_h[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                            samples = np.vstack([np.repeat(a_h[component,hour],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate)])
-                            pdf = kdes_h[(24*month)+time_of_day].evaluate(samples)
-                            iteration += 1
-                            if iteration > 1000:
-                                print('Too many iterations')
-                                break
             ############################################################################
             ############################## DAILY PART ##################################
             ############################################################################
-            # 24 hours has passed we need a new daily value -
-            if hour % 24.0 == 0:
+            if hour % 24.0 == 0 and hour != 0:
                 # Calculate what day we are in.
                 day = hour / 24.0
-                # If the hour fits the timelag, generated new data with the real data start starting point
+
+                # If the timelag fits with the 24 hours, we know everything about the last day - we then generate a new value from the real data.
                 if hour % timelag == 0:
                     UpdateDaily_because_of_timelag = False
-
                     samples = np.vstack([np.repeat(weights_daily_all[component,day-1],samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
                     pdf = kdes_d[month].evaluate(samples)
 
@@ -725,8 +701,14 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                     daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                    samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
-                    pdf = kdes_d[month].evaluate(samples)
+                    # Check if the next hour is in a new month, needed to check if the next value is legal.
+                    next_m = month
+                    if (hour+1) > hours_in_month[12*year+month]:
+                        next_m = month + 1
+                        if next_m == 12:
+                            next_m = 0
+                    samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[next_m], max_value_d[next_m], samplerate)])
+                    pdf = kdes_d[next_m].evaluate(samples)
 
                     iteration = 0
                     if np.sum(pdf) == 0.0:
@@ -737,17 +719,18 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                             daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                            samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
-                            pdf = kdes_d[month].evaluate(samples)
+                            samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[next_m], max_value_d[next_m], samplerate)])
+                            pdf = kdes_d[next_m].evaluate(samples)
 
                             iteration += 1
                             if iteration > 1000:
                                 print('Too many iterations')
                                 break
 
+                # If we are not on the timelag then generate the next daily value from the generated series.
+                # Will be updated when we hit the timelag.
                 else:
                     UpdateDaily_because_of_timelag = True
-
                     samples = np.vstack([np.repeat(a_d[component,hour],samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
                     pdf = kdes_d[month].evaluate(samples)
 
@@ -758,8 +741,15 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                     daily_amplitude = a_d[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                    samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
-                    pdf = kdes_d[month].evaluate(samples)
+                    # Check if next hour is in a new month
+                    next_m = month
+                    if (hour+1) > hours_in_month[12*year+month]:
+                        next_m = month + 1
+                        if next_m == 12:
+                            next_m = 0
+
+                    samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[next_m], max_value_d[next_m], samplerate)])
+                    pdf = kdes_d[next_m].evaluate(samples)
 
                     iteration = 0
                     if np.sum(pdf) == 0.0:
@@ -770,15 +760,18 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                             daily_amplitude = a_d[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                            samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
-                            pdf = kdes_d[month].evaluate(samples)
+                            samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[next_m], max_value_d[next_m], samplerate)])
+                            pdf = kdes_d[next_m].evaluate(samples)
 
                             iteration += 1
                             if iteration > 1000:
                                 print('Too many iterations')
                                 break
 
-            # Update the daily value
+                 # Write the daily value to the daily amplitude array
+                a_d[component,hour] = daily_amplitude
+
+                        # Update the daily value
             if UpdateDaily_because_of_timelag and hour % timelag == 0:
 
                 UpdateDaily_because_of_timelag = False
@@ -793,8 +786,15 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                 daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
-                pdf = kdes_d[month].evaluate(samples)
+                # Check if the next hour is in a new month, needed to check if the next value is legal.
+                next_m = month
+                if (hour+1) > hours_in_month[12*year+month]:
+                    next_m = month + 1
+                    if next_m == 12:
+                        next_m = 0
+
+                samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[next_m], max_value_d[next_m], samplerate)])
+                pdf = kdes_d[next_m].evaluate(samples)
 
                 iteration = 0
                 if np.sum(pdf) == 0.0:
@@ -805,8 +805,8 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                         daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                        samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate)])
-                        pdf = kdes_d[month].evaluate(samples)
+                        samples = np.vstack([np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[next_m], max_value_d[next_m], samplerate)])
+                        pdf = kdes_d[next_m].evaluate(samples)
 
                         iteration += 1
                         if iteration > 1000:
@@ -815,10 +815,10 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
             # Write the daily value to the daily amplitude array
             a_d[component,hour] = daily_amplitude
-
             ############################################################################
             ################## MONTHLY PART ############################################
             ############################################################################
+
             if hour == hours_in_semi_month[semi_month]:
                 semi_month+= 1
 
@@ -835,21 +835,26 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                     semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                    samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate)])
-                    pdf = kdes_m[month].evaluate(samples)
+                    # Check if the next hour is in a new month, needed to check if the next value is legal.
+                    next_m = month
+                    if (hour+1) > hours_in_month[12*year+month]:
+                        next_m = month + 1
+                        if next_m == 12:
+                            next_m = 0
+                    samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[next_m], max_values_m[next_m], samplerate)])
+                    pdf = kdes_m[next_m].evaluate(samples)
 
                     # Check if we go out of bounds, then find a new random value which would bring us back.
                     iteration = 0
                     if np.sum(pdf) == 0.0:
-                        #print 'out', i
                         while np.sum(pdf) == 0.0:
 
                             p = norm.rvs(loc=0, scale=1)
 
                             semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                            samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate)])
-                            pdf = kdes_m[month].evaluate(samples)
+                            samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[next_m], max_values_m[next_m], samplerate)])
+                            pdf = kdes_m[next_m].evaluate(samples)
 
                             iteration += 1
                             if iteration > 1000:
@@ -867,8 +872,15 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                     semi_monthly_amplitude = a_m[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                    samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate)])
-                    pdf = kdes_m[month].evaluate(samples)
+                    # Check if the next hour is in a new month, needed to check if the next value is legal.
+                    next_m = month
+                    if (hour+1) > hours_in_month[12*year+month]:
+                        next_m = month + 1
+                        if next_m == 12:
+                            next_m = 0
+
+                    samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[next_m], max_values_m[next_m], samplerate)])
+                    pdf = kdes_m[next_m].evaluate(samples)
 
                     # Check if we go out of bounds, then find a new random value which would bring us back.
                     iteration = 0
@@ -880,8 +892,8 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                             semi_monthly_amplitude = a_m[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                            samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate)])
-                            pdf = kdes_m[month].evaluate(samples)
+                            samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[next_m], max_values_m[next_m], samplerate)])
+                            pdf = kdes_m[next_m].evaluate(samples)
 
                             iteration += 1
                             if iteration > 1000:
@@ -900,9 +912,15 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
                 p = norm.rvs(loc=0, scale=1)
 
                 semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
+                # Check if the next hour is in a new month, needed to check if the next value is legal.
+                next_m = month
+                if (hour+1) > hours_in_month[12*year+month]:
+                    next_m = month + 1
+                    if next_m == 12:
+                        next_m = 0
 
-                samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate)])
-                pdf = kdes_m[month].evaluate(samples)
+                samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[next_m], max_values_m[next_m], samplerate)])
+                pdf = kdes_m[next_m].evaluate(samples)
 
                 # Check if we go out of bounds, then find a new random value which would bring us back.
                 iteration = 0
@@ -914,8 +932,8 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
 
                         semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
 
-                        samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate)])
-                        pdf = kdes_m[month].evaluate(samples)
+                        samples = np.vstack([np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[next_m], max_values_m[next_m], samplerate)])
+                        pdf = kdes_m[next_m].evaluate(samples)
                         iteration += 1
 
                         if iteration > 1000:
@@ -925,18 +943,16 @@ def generateMismatchFromTimelag(filename,weights_monthly_all,weights_daily_all,w
             a_m[component,hour] = semi_monthly_amplitude
 
             if hour%10000 == 0:
-                print '10k hours generated'
+                print str(hour/1000)+'k hours generated'
 
         for i in np.arange(0, T, tau):
             epsilon[component,i] = a_m[component,i] + a_d[component,i] + a_h[component,i] # The +1 is to skip the startvalue of epsilon_h
-            if i == 0:
-                print epsilon[component,i]
-                print PCA.get_xi_weight(h, component)[0]
 
         lambd, princ_comp = PCA.get_principal_component(h, component)
         mismatch_PC = PCA.unnormalize_uncenter(princ_comp,Ntilde, mean_mismatch)
 
         approx_mismatch += np.outer(mismatch_PC, epsilon[component,:])
+        print 'One Component done'
 
     filename = 'weights_generated.npy'
     np.save('approx_mismatch_generated'+'.npy',approx_mismatch)
@@ -1170,931 +1186,6 @@ def createDictioariesOfMonthsInHours(Days,CumSumOfMonths):
     Month_dic = {'Jan':Jan_a,'Feb' : Feb_a,'Mar': Mar_a,'Apr':Apr_a,'May':May_a,'Jun':Jun_a,'Jul':Jul_a,'Aug':Aug_a,'Sep':Sep_a,'Okt':Okt_a,'Nov':Nov_a,'Dec':Dec_a}
 
     return Month_dic
-
-
-
-#################################################################################################################################
-#################################################################################################################################
-#################################################################################################################################
-#################################################################################################################################
-#################################################################################################################################
-#################################################################################################################################
-def OLDgenerateTransitionKDEs(weights_monthly_all,weights_daily_all,weights_hourly_all,detrended_weight,NumberOfComponents=1):
-    """
-    This takes a long time. (The hourly part does)
-    Takes detrended data and creates transition KDEs to be used in time series generation
-    A KDE is created for each month in a year
-    Results are saved in pkl files.
-    :param weights_monthly_all:
-    :param weights_daily_all:
-    :param weights_hourly_all:
-    :param detrended_weight:
-    :param NumberOfComponents:
-    :return:
-    """
-    numberOfDays = weights_daily_all.shape[1]
-    CumSumOfMonthsInDays,CumSumOfMonthsInHours = createCumulativeSumOfDaysInData()
-
-    for component in range(NumberOfComponents):
-
-        #######################################################################################
-        ####################### Monthly KDE ###################################################
-        #######################################################################################
-        # Data strucktures
-        kdes = {}
-        max_values = []
-        min_values = []
-        value_intervals = np.zeros([12,samplerate]) #
-
-        # Pick out the samples for the current component, reshape into a 8x24 array
-        Monthly_samples = np.reshape(weights_monthly_all[component,:],(8, 24))
-
-        # Begin the calculation of transition KDEs -
-        x = 0
-        for i in np.arange(0,24,2):
-            if i == 22:
-                weight_monthly = np.append(Monthly_samples[:,i],Monthly_samples[:,i+1])
-                weight_monthly_trans = np.append(Monthly_samples[:,i+1],Monthly_samples[:,0])
-            else:
-                weight_monthly = np.append(Monthly_samples[:,i],Monthly_samples[:,i+1])
-                weight_monthly_trans = np.append(Monthly_samples[:,i+1],Monthly_samples[:,i+2])
-
-
-            stack = np.vstack((weight_monthly,weight_monthly_trans )).T
-            # Brug gridseach from skt.learn for at finde bandwidth af KDE
-            grid = GridSearchCV(KernelDensity(kernel='epanechnikov'), {'bandwidth': np.logspace(-10, 10, 1000)}) # 20-fold cross-validation
-
-            # Fitting the GridSearch to the stack. So we can finde the best bandwidth for the KDE.
-            grid.fit(stack)
-            # Use the best estimator to compute the kernel density estimate
-            kde = grid.best_estimator_
-            kdes[x] = kde
-
-
-            # Defining the sample range, and number of samples
-            max_value = np.max(weight_monthly) + np.max(weight_monthly)/10  # Max value plus 10%. THIS IS JUST AN ESTIMATE
-            min_value = np.min(weight_monthly) - np.min(weight_monthly)/10  # Min value plus 10%. JUST AN ESTIMATE
-            value_interval = np.linspace(min_value, max_value, samplerate)
-
-            max_values = np.append(max_values,max_value)
-            min_values = np.append(min_values,min_value)
-            value_intervals[x,:] = value_interval
-            x = x + 1
-
-
-
-        Monthly_data = {'max': max_values,'min':min_values,'interval': value_intervals,'kde':kdes}
-        with open('monthly_kde_full_k='+str(component+1)+'.pkl', 'wb') as f:
-            pickle.dump(Monthly_data, f, pickle.HIGHEST_PROTOCOL)
-
-        ########################################################################################
-        ########################## Now to the daily KDE ########################################
-        ########################################################################################
-
-        Daily_Month_dic = createDictioariesOfMonthsInHours(np.reshape(detrended_weight[component,:],(numberOfDays, 24)),CumSumOfMonthsInHours)
-        kdes = {}
-        max_values = []
-        min_values = []
-        value_intervals = np.zeros([12,500])
-        x = 0
-        for key in ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Okt','Nov','Dec']:
-        #     print key
-            months = Daily_Month_dic[key]
-            daily = np.sum(months,axis=1)/24
-
-            # Here the transition is from one day to the next, with the last day transition to the first in the arry.
-            weight_daily = daily
-            weight_daily_trans = np.roll(daily,-1)
-
-            # Same operation as before - find the KDE
-            stack = np.vstack((weight_daily,weight_daily_trans)).T
-            grid = GridSearchCV(KernelDensity(kernel='epanechnikov'), {'bandwidth': np.logspace(-10, 10, 1000)}) # 20-fold cross-validation
-
-
-            # Fitting the GridSearch to the stack. So we can finde the best bandwidth for the KDE.
-            grid.fit(stack)
-            # use the best estimator to compute the kernel density estimate
-            kde = grid.best_estimator_
-            kdes[x] = kde
-
-            # Defining the sample range, and number of samples
-            max_value = np.max(weight_daily) + np.max(weight_daily)/10  # Max value plus 10%. THIS IS JUST AN ESTIMATE
-            min_value = np.min(weight_daily) - np.min(weight_daily)/10  # Min value plus 10%. JUST AN ESTIMATE
-            value_interval = np.linspace(min_value, max_value, samplerate)
-
-            max_values = np.append(max_values,max_value)
-            min_values = np.append(min_values,min_value)
-            value_intervals[x,:] = value_interval
-            x = x + 1
-
-
-        # Save to file - saving the max, min, value interval and the kde.
-        daily_data = {'max': max_values,'min':min_values,'interval': value_intervals,'kde':kdes}
-        with open('daily_kde_full_k='+str(component+1)+'.pkl', 'wb') as f:
-            pickle.dump(daily_data, f, pickle.HIGHEST_PROTOCOL)
-
-        ########################################################################################
-        ################# Now to the hourly KDE (The slowest one) ##############################
-        ########################################################################################
-
-        Month_dic = createDictioariesOfMonthsInHours(np.reshape(weights_hourly_all[component,:],(numberOfDays, 24)),CumSumOfMonthsInHours)
-
-        hourly_kdes = {}
-        hourly_max_values = []
-        hourly_min_values = []
-        hourly_value_intervals = np.zeros([24*12,500])
-
-        x = 0
-
-        for key in ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Okt','Nov','Dec']:
-            months = Month_dic[key]
-            for i in range(24):
-                if i == 23:
-                    stack = np.vstack((months[:,i],months[:,0] )).T
-                else:
-
-                    stack = np.vstack((months[:,i],months[:,i+1] )).T
-
-                grid = GridSearchCV(KernelDensity(kernel='epanechnikov'), {'bandwidth': np.logspace(-10, 10, 1000)},cv=20) # 20-fold cross-validation
-
-                # Fitting the GridSearch to the stack. So we can finde the best bandwidth for the KDE.
-                grid.fit(stack)
-                print grid.best_params_
-                # use the best estimator to compute the kernel density estimate
-                kde = grid.best_estimator_
-                hourly_kdes [x] = kde
-
-
-                # Defining the sample range, and number of samples
-                max_value = np.max(months[:,i]) + np.max(months[:,i])/10  # Max value plus 10%. THIS IS JUST AN ESTIMATE
-                min_value = np.min(months[:,i]) - np.min(months[:,i])/10  # Min value plus 10%. JUST AN ESTIMATE
-                value_interval = np.linspace(min_value, max_value, samplerate)
-
-                hourly_max_values = np.append(hourly_max_values ,max_value)
-                hourly_min_values = np.append(hourly_min_values ,min_value)
-                hourly_value_intervals[x,:] = value_interval
-                x = x + 1
-
-
-                samples = np.vstack((np.repeat(np.linspace(min_value, max_value, 500), 500), np.tile(np.linspace(min_value, max_value, 500), 500))).T
-                pdf = np.exp(kde.score_samples(samples))
-                pdf = np.reshape(pdf, (500,500))
-
-                fig, ax = plt.subplots()
-                ax.contour(np.linspace(min_value, max_value, 500), np.linspace(min_value, max_value, 500), pdf,10)
-                if i == 23:
-                    ax.plot(months[:,i],months[:,0], 'k.')
-                else:
-                    ax.plot(months[:,i],months[:,i+1], 'k.')
-                ax.set_ylabel(r'$a(t+\tau)$')
-                ax.set_xlabel(r'$a(t)$')
-                ax.set_xlim([-1,1])
-                ax.set_ylim([-1,1])
-                fig.savefig('results/figures/' + key+str(i)+'KDE' + '.pdf')
-
-                print 'results/figures/' + key+str(i)+'KDE' + '.pdf'+'  SAVED'
-
-
-        Hourly_data = {'max':  hourly_max_values,'min': hourly_min_values,'interval': hourly_value_intervals,'kde':hourly_kdes}
-        with open('hourly_kde_full_k='+str(component+1)+'.pkl', 'wb') as f:
-           pickle.dump(Hourly_data, f, pickle.HIGHEST_PROTOCOL)
-
-
-
-def generate_new_monthly_data(StartValue,StartMonth='Jan',N = 1,NumberOfComponents=1,):
-    """
-    This method generatess new semi-monthly hourly avg's of PCA weights
-    There must be a .pkl file of the KDE - These can be generated with 'generateTransitionKDEs'
-    The new series is saved as an .npy file 'epsilon_m_full_k=..'
-    :param StartValue: Stating value for generating series -
-    :param N: Number of Steps to generate beyond the StartValue
-    :param NumberOfComponents: How many components should be used in generating the new series, each results in their own series.
-    :return epsilon_m:  Returns the generated series
-    """
-    if N == 'Single':
-        epsilon_m = np.zeros((NumberOfComponents,1))
-        for component in range(NumberOfComponents):
-            if hasattr(StartValue, '__len__') and (not isinstance(StartValue, str)):
-                epsilon_m[component,0] = StartValue[component]
-
-            else:
-                epsilon_m[component,0] = StartValue[component]
-
-            np.save('results/'+'epsilon_m_full_k=' + str(component+1), epsilon_m[component,:])
-
-    else:
-        epsilon_m = np.zeros((NumberOfComponents,N+1))
-        for component in range(NumberOfComponents):
-            with open('monthly_kde_full_k='+str(component+1)+'.pkl', 'rb') as f:
-                Monthly_data = pickle.load(f)
-
-            kdes = Monthly_data['kde']
-            max_values = Monthly_data['max']
-            min_values = Monthly_data['min']
-            value_intervals = Monthly_data['interval']
-
-            if hasattr(StartValue, '__len__') and (not isinstance(StartValue, str)):
-                epsilon_m[component,0] = StartValue[component]
-
-            else:
-                epsilon_m[component,0] = StartValue
-
-            tau = 1 # Step size
-            month = getIndexOfStartMonth(StartMonth=StartMonth)
-            for i in np.arange(1, N+1, tau):
-                samples = np.vstack((np.repeat(epsilon_m[component,i-1],samplerate), np.linspace(min_values[month], max_values[month], samplerate))).T
-                pdf = np.exp(kdes[month].score_samples(samples))
-
-                drift = KDE.kramer_moyal_coeff(epsilon_m[component,i-1], value_intervals[month,:], pdf, n=1, tau=1)
-                diffusion = KDE.kramer_moyal_coeff(epsilon_m[component,i-1], value_intervals[month,:], pdf, n=2, tau=1)
-
-                p = norm.rvs(loc=0, scale=1)
-
-                epsilon_m[component,i] = epsilon_m[component,i-1] + drift*tau + np.sqrt(diffusion*tau)*p
-                #month = month + 1
-
-                # After 2 steps change what month we are in.
-                # Expept for the first step, where we have startvalues, we change month after one step.
-                if i+1 % 2 == 0:
-                    month += 1
-                    if month == 12:
-                        month = 0
-
-                samples = np.vstack((np.repeat(epsilon_m[component,i],samplerate), np.linspace(min_values[month], max_values[month], samplerate))).T
-                pdf = np.exp(kdes[month].score_samples(samples))
-
-                # Check if we go out of bounds, then find a new random value which would bring us back.
-                iteration = 0
-                if np.sum(pdf) == 0.0:
-                    #print 'out', i
-                    while np.sum(pdf) == 0.0:
-
-                        p = norm.rvs(loc=0, scale=1)
-
-                        epsilon_m[component,i] = epsilon_m[component,i-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                        samples = np.vstack((np.repeat(epsilon_m[component,i],samplerate), np.linspace(min_values[month], max_values[month], samplerate))).T
-                        pdf = np.exp(kdes[month].score_samples(samples))
-
-                        iteration += 1
-                        if iteration > 1000:
-                            print('Too many iterations')
-                            break
-                    #print epsilon_m[component,i]
-
-            #print 'Mean e_m:',np.mean(epsilon_m)
-            # Mean the generated series - to remove any slight trends - Tho only if we generate more data than a years worth
-            if N >24:
-                epsilon_m[component,1::1] = epsilon_m[component,1::1] - np.mean(epsilon_m[component,1::1])
-            # Save the generated monthly series.
-            np.save('results/'+'epsilon_m_full_k=' + str(component+1), epsilon_m[component,:])
-
-    return epsilon_m
-
-
-def generate_new_daily_data(StartValue,StartMonth='Jan',N = 1,NumberOfComponents=1):
-    """
-    This method generatess new daily hourly avg's of PCA weights
-    There must be a .pkl file of the KDE - These can be generated with 'generateTransitionKDEs'
-    The new series is saved as an .npy file 'epsilon_d_full_k=..'
-    :param StartValue: Stating value for generating series -
-    :param N: Number of Steps to generate beyond the StartValue
-    :param NumberOfComponents: How many components should be used in generating the new series, each results in their own series.
-    :return epsilon_d:  Returns the generated series
-    """
-    epsilon_d = np.zeros((NumberOfComponents,N+1))
-
-    # Cumulative sum of the days - sliced so we only the month total - like this [30,61...]
-    daysCumSum = createCumulativeSumOfDaysInData(StartMonth=StartMonth)[0][1::2]
-
-    for component in range(NumberOfComponents):
-
-        with open('daily_kde_full_k='+str(component+1)+'.pkl', 'rb') as f:
-            Daily_data = pickle.load(f)
-
-        kde_Daily = Daily_data['kde']
-        max_value_daily = Daily_data['max']
-        min_value_daily = Daily_data['min']
-        value_interval_daily = Daily_data['interval']
-
-        if hasattr(StartValue, '__len__') and (not isinstance(StartValue, str)):
-            epsilon_d[component,0] = StartValue[component]
-
-        else:
-            epsilon_d[component,0] = StartValue
-
-        tau = 1
-        month = getIndexOfStartMonth(StartMonth=StartMonth)
-        for i in np.arange(1, N+1, tau):
-
-            samples = np.vstack((np.repeat(epsilon_d[component,i-1],samplerate), np.linspace(min_value_daily[month], max_value_daily[month], samplerate))).T
-            pdf = np.exp(kde_Daily[month].score_samples(samples))
-            drift = KDE.kramer_moyal_coeff(epsilon_d[component,i-1], value_interval_daily[month,:], pdf, n=1, tau=1)
-            diffusion = KDE.kramer_moyal_coeff(epsilon_d[component,i-1], value_interval_daily[month,:], pdf, n=2, tau=1)
-
-            p = norm.rvs(loc=0, scale=1)
-
-            epsilon_d[component,i] = epsilon_d[component,i-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-            if i == daysCumSum[month]:
-                month += 1
-                if month == 12:
-                    month = 0
-
-            samples = np.vstack((np.repeat(epsilon_d[component,i],samplerate), np.linspace(min_value_daily[month], max_value_daily[month], samplerate))).T
-            pdf = np.exp(kde_Daily[month].score_samples(samples))
-
-            iteration = 0
-            if np.sum(pdf) == 0.0:
-                #print 'out', i
-                while np.sum(pdf) == 0.0:
-
-                    p = norm.rvs(loc=0, scale=1)
-
-                    epsilon_d[component,i] = epsilon_d[component,i-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    samples = np.vstack((np.repeat(epsilon_d[component,i],samplerate), np.linspace(min_value_daily[month], max_value_daily[month], samplerate))).T
-                    pdf = np.exp(kde_Daily[month].score_samples(samples))
-
-                    iteration += 1
-                    if iteration > 1000:
-                        print('Too many iterations')
-                        break
-                #print epsilon_d[component,i]
-
-
-        # Mean the generated series - to remove any slight trends - Tho only if we generate more data than a years worth
-        if N > 365:
-            epsilon_d[component,1::1] = epsilon_d[component,1::1] - np.mean(epsilon_d[component,1::1])
-
-        np.save('results/'+'epsilon_d_full_k=' + str(component+1), epsilon_d[component,:])
-    return epsilon_d
-
-
-def generate_new_hourly_data(StartValue,StartMonth='Jan',N = 1,NumberOfComponents=1):
-    """
-    This method generatess new hourly weights for PCA vectors
-    There must be a .pkl file of the KDE - These can be generated with 'generateTransitionKDEs'
-    The new series is saved as an .npy file 'epsilon_d_full_k=..'
-    :param StartValue: Stating value for generating series -
-    :param N: Number of Steps to generate beyond the StartValue
-    :param NumberOfComponents: How many components should be used in generating the new series, each results in their own series.
-    :return epsilon_d:  Returns the generated series
-    """
-
-    # Array to store the geneatede data in
-    epsilon_h = np.zeros((NumberOfComponents,N+1))
-
-    # Cumulative sum of hours - sliced so we only the month total - like this [720,1464...]
-    hours_in_month = createCumulativeSumOfDaysInData(StartMonth=StartMonth)[1][1::2]
-
-    for component in range(NumberOfComponents):
-        with open('hourly_kde_full_k='+str(component+1)+'.pkl', 'rb') as f:
-            Hourly_data = pickle.load(f)
-
-        kdes = Hourly_data['kde']
-        max_values = Hourly_data['max']
-        min_values = Hourly_data['min']
-        value_intervals = Hourly_data['interval']
-
-        if hasattr(StartValue, '__len__') and (not isinstance(StartValue, str)):
-            epsilon_h[component,0] = StartValue[component]
-
-        else:
-            epsilon_h[component,0] = StartValue
-
-
-        tau = 1
-        # Starting month, year and time of the day
-        month = getIndexOfStartMonth(StartMonth=StartMonth)
-        year = 0 # In a sense useless, leftover from generating 8 years of data, in terms of leapyear and such. On TODO: Change generating of cumsum of hours.
-        time_of_day = 1 # Since we have a start value for the hours, at hour "0" th first generate value will be at hour 1.
-
-        for i in np.arange(1, N+1, tau):
-
-            # Keeping track on wat month and year we are in when generating data
-            if i == hours_in_month[12*year+month]:
-                month += 1
-                print time_of_day
-
-            if month == 12:
-                month = 0
-                year += 1
-
-            samples = np.vstack((np.repeat(epsilon_h[component,i-1],samplerate), np.linspace(min_values[(24*month)+time_of_day], max_values[(24*month)+time_of_day], samplerate))).T
-            pdf = np.exp(kdes[(24*month)+time_of_day].score_samples(samples))
-
-            drift = KDE.kramer_moyal_coeff(epsilon_h[component,i-1], value_intervals[(24*month)+time_of_day,:], pdf, n=1, tau=1)
-            diffusion = KDE.kramer_moyal_coeff(epsilon_h[component,i-1], value_intervals[(24*month)+time_of_day,:], pdf, n=2, tau=1)
-
-            p = norm.rvs(loc=0, scale=1)
-
-            epsilon_h[component,i] = epsilon_h[component,i-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-            time_of_day += 1
-            if time_of_day == 24:
-                time_of_day = 0
-
-
-            samples = np.vstack((np.repeat(epsilon_h[component,i],samplerate), np.linspace(min_values[(24*month)+time_of_day], max_values[(24*month)+time_of_day], samplerate))).T
-            pdf = np.exp(kdes[(24*month)+time_of_day].score_samples(samples))
-
-
-            iteration = 0
-            if np.sum(pdf) == 0.0:
-                # print 'out', i
-                while np.sum(pdf) == 0.0:
-
-                    p = norm.rvs(loc=0, scale=1)
-
-                    epsilon_h[component,i] = epsilon_h[component,i-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    samples = np.vstack((np.repeat(epsilon_h[component,i],samplerate), np.linspace(min_values[(24*month)+time_of_day], max_values[(24*month)+time_of_day], samplerate))).T
-                    pdf = np.exp(kdes[(24*month)+time_of_day].score_samples(samples))
-
-                    iteration += 1
-                    if iteration > 1000:
-                        print('Too many iterations')
-                        break
-
-        if N > 365*24:
-            epsilon_h[component,:] = epsilon_h[component,:] - np.mean(epsilon_h[component,:])
-
-        np.save('results/'+'epsilon_h_full_k=' + str(component+1), epsilon_h[component,:])
-
-    return epsilon_h
-
-
-def generate_new_data(filename,StartValues,StartMonth='Jan',N = 1,year = 0,NumberOfComponents=1):
-    """
-    The primary method to generate new data -
-    All data start from Jan 1. and is then generate from that point.
-    :param filename:
-    :param StartValues:
-    :param N: Number of hours you wish to generate
-    :param NumberOfComponents:
-    :return:
-    """
-
-    hours_in_months = createCumulativeSumOfDaysInData(StartMonth=StartMonth)[1]
-    semi_months = next(x for x in hours_in_months if x >= N)
-    semi_months_count = (np.where(hours_in_months==semi_months)[0])
-
-
-    # Calculating the approprite number of days and semi-months steps to be generated, to fit with the number of hours generated N
-
-    # If We have a start date in Jan, in the first year and we are not generating more 15 days than worth of data -
-    # We only have the starting value from the data - Therefore no new data will be generated.
-    if StartMonth == 'Jan' and year == 0 and semi_months_count == 0:
-        generate_new_monthly_data(StartValues[0,:],StartMonth=StartMonth,N = 'Single',NumberOfComponents=NumberOfComponents)
-        days = np.ceil(N/24.0)
-        generate_new_daily_data(StartValues[1,:],StartMonth=StartMonth,N = days,NumberOfComponents=NumberOfComponents)
-        generate_new_hourly_data(StartValues[2,:],StartMonth=StartMonth,N = N,NumberOfComponents=NumberOfComponents)
-
-        addTimeScalesTogethor(filename,N = N,NumberOfComponents=NumberOfComponents)
-
-    else:
-
-        # Converting the number of hours into fitting number of semi-months and days - an excess of one data point might happen
-        # - will not matter when creating the full data set
-
-        hours_in_months = createCumulativeSumOfDaysInData(StartMonth=StartMonth)[1]
-        semi_months = next(x for x in hours_in_months if x >= N)
-        semi_months_count = (np.where(hours_in_months==semi_months)[0]) + 1
-        days = np.ceil(N/24.0)
-
-        generate_new_monthly_data(StartValues[0,:],StartMonth=StartMonth,N = semi_months_count,NumberOfComponents=NumberOfComponents)
-        generate_new_daily_data(StartValues[1,:],StartMonth=StartMonth,N = days,NumberOfComponents=NumberOfComponents)
-        generate_new_hourly_data(StartValues[2,:],StartMonth=StartMonth,N = N,NumberOfComponents=NumberOfComponents)
-
-        addTimeScalesTogethor(filename,N = N,NumberOfComponents=NumberOfComponents)
-
-
-def generateMismatchFromTimelagOLD(weights_monthly_all,weights_daily_all,weights_hourly_all,timelag=1,NumberOfComponents=1):
-
-    # Data strucktues
-    T = len(weights_hourly_all[0,:])
-    a_h = np.zeros((NumberOfComponents,T))
-    a_d = np.zeros((NumberOfComponents,T))
-    a_m = np.zeros((NumberOfComponents,T))
-
-    # Setting starting values
-    a_h[:,0] = weights_hourly_all[0:NumberOfComponents,0]
-    a_d[:,0] = weights_daily_all[0:NumberOfComponents,0]
-    a_m[:,0] = weights_monthly_all[0:NumberOfComponents,0]
-
-    hours_in_month = createCumulativeSumOfDaysInData(StartMonth='Jan')[1][1::2]
-    hours_in_semi_month = createCumulativeSumOfDaysInData(StartMonth='Jan')[1]
-
-    # Loop over number of components
-    for component in range(NumberOfComponents):
-
-        # Load relevant kdes and associated  values.
-        with open('hourly_kde_full_k='+str(component+1)+'.pkl', 'rb') as f:
-            Hourly_data = pickle.load(f)
-
-        kdes_h = Hourly_data['kde']
-        max_values_h = Hourly_data['max']
-        min_values_h = Hourly_data['min']
-        value_intervals_h = Hourly_data['interval']
-
-        with open('daily_kde_full_k='+str(component+1)+'.pkl', 'rb') as f:
-            Daily_data = pickle.load(f)
-
-        kde_d = Daily_data['kde']
-        max_value_d = Daily_data['max']
-        min_value_d = Daily_data['min']
-        value_interval_d = Daily_data['interval']
-
-        with open('monthly_kde_full_k='+str(component+1)+'.pkl', 'rb') as f:
-                Monthly_data = pickle.load(f)
-
-        kdes_m = Monthly_data['kde']
-        max_values_m = Monthly_data['max']
-        min_values_m = Monthly_data['min']
-        value_intervals_m = Monthly_data['interval']
-
-
-        # Begin to create generated values
-        daily_amplitude = weights_daily_all[component,0]
-        semi_monthly_amplitude = weights_monthly_all[component,0]
-        UpdateDaily_because_of_timelag = False
-        UpdateSemiMonthly_because_of_timelag = False
-        day = 0
-        semi_month = 0
-        month = 0
-        year = 0
-        time_of_day = 1 # Since we use the real data values for hour 0, the generated data is
-        for hour in range(1,1000):
-            print time_of_day,'Time of day'
-            print hour,'Hour'
-            # Keeping track on wat month and year we are in when generating data
-            if hour == hours_in_month[12*year+month]:
-                month += 1
-                print time_of_day
-
-            if month == 12:
-                month = 0
-                year += 1
-
-            if (hour % timelag)+1 == 1 and hour != 0:
-
-                samples = np.vstack((np.repeat(weights_hourly_all[component,hour],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate))).T
-                pdf = np.exp(kdes_h[(24*month)+time_of_day].score_samples(samples))
-
-                drift = KDE.kramer_moyal_coeff(weights_hourly_all[component,hour], value_intervals_h[(24*month)+time_of_day,:], pdf, n=1, tau=1)
-                diffusion = KDE.kramer_moyal_coeff(weights_hourly_all[component,hour], value_intervals_h[(24*month)+time_of_day,:], pdf, n=2, tau=1)
-
-                p = norm.rvs(loc=0, scale=1)
-
-                a_h[component,hour+1] = weights_hourly_all[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                time_of_day += 1
-                if time_of_day == 24:
-                    time_of_day = 0
-
-                # Check if the new value is "legal"
-                samples = np.vstack((np.repeat(a_h[component,hour+1],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate))).T
-                pdf = np.exp(kdes_h[(24*month)+time_of_day].score_samples(samples))
-
-
-                iteration = 0
-                if np.sum(pdf) == 0.0:
-                    # print 'out', i
-                    while np.sum(pdf) == 0.0:
-
-                        p = norm.rvs(loc=0, scale=1)
-
-                        a_h[component,hour+1] = weights_hourly_all[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                        samples = np.vstack((np.repeat(a_h[component,hour+1],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate))).T
-                        pdf = np.exp(kdes_h[(24*month)+time_of_day].score_samples(samples))
-
-                        iteration += 1
-                        if iteration > 1000:
-                            print('Too many iterations')
-                            break
-            else:
-                    samples = np.vstack((np.repeat(a_h[component,hour],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate))).T
-                    pdf = np.exp(kdes_h[(24*month)+time_of_day].score_samples(samples))
-
-                    drift = KDE.kramer_moyal_coeff(a_h[component,hour], value_intervals_h[(24*month)+time_of_day,:], pdf, n=1, tau=1)
-                    diffusion = KDE.kramer_moyal_coeff(a_h[component,hour], value_intervals_h[(24*month)+time_of_day,:], pdf, n=2, tau=1)
-
-                    p = norm.rvs(loc=0, scale=1)
-
-                    a_h[component,hour+1] = a_h[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    time_of_day += 1
-                    if time_of_day == 24:
-                        time_of_day = 0
-
-                    # Check if the new value is "legal"
-                    samples = np.vstack((np.repeat(a_h[component,hour+1],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate))).T
-                    pdf = np.exp(kdes_h[(24*month)+time_of_day].score_samples(samples))
-
-
-                    iteration = 0
-                    if np.sum(pdf) == 0.0:
-                        # print 'out', i
-                        while np.sum(pdf) == 0.0:
-
-                            p = norm.rvs(loc=0, scale=1)
-
-                            a_h[component,hour+1] = a_h[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                            samples = np.vstack((np.repeat(a_h[component,hour+1],samplerate), np.linspace(min_values_h[(24*month)+time_of_day], max_values_h[(24*month)+time_of_day], samplerate))).T
-                            pdf = np.exp(kdes_h[(24*month)+time_of_day].score_samples(samples))
-
-                            iteration += 1
-                            if iteration > 1000:
-                                print('Too many iterations')
-                                break
-            ############################################################################
-            ############################## DAILY PART ##################################
-            ############################################################################
-            # 24 hours has passed we need a new daily value -
-            if hour % 24.0 == 0 and hour != 0:
-                # Calculate what day we are in.
-                day = hour / 24.0
-                # If the hour fits the timelag, generated new data with the real data start starting point
-                if hour % timelag == 0:
-                    UpdateDaily_because_of_timelag = False
-                    samples = np.vstack((np.repeat(weights_daily_all[component,day-1],samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                    pdf = np.exp(kde_d[month].score_samples(samples))
-                    drift = KDE.kramer_moyal_coeff(weights_daily_all[component,day-1], value_interval_d[month,:], pdf, n=1, tau=1)
-                    diffusion = KDE.kramer_moyal_coeff(weights_daily_all[component,day-1], value_interval_d[month,:], pdf, n=2, tau=1)
-
-                    p = norm.rvs(loc=0, scale=1)
-
-                    daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    samples = np.vstack((np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                    pdf = np.exp(kde_d[month].score_samples(samples))
-
-                    iteration = 0
-                    if np.sum(pdf) == 0.0:
-
-                        while np.sum(pdf) == 0.0:
-
-                            p = norm.rvs(loc=0, scale=1)
-
-                            daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                            samples = np.vstack((np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                            pdf = np.exp(kde_d[month].score_samples(samples))
-
-                            iteration += 1
-                            if iteration > 1000:
-                                print('Too many iterations')
-                                break
-
-                else:
-                    UpdateDaily_because_of_timelag = True
-                    samples = np.vstack((np.repeat(a_d[component,hour],samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                    pdf = np.exp(kde_d[month].score_samples(samples))
-
-                    drift = KDE.kramer_moyal_coeff(a_d[component,hour], value_interval_d[month,:], pdf, n=1, tau=1)
-                    diffusion = KDE.kramer_moyal_coeff(a_d[component,hour], value_interval_d[month,:], pdf, n=2, tau=1)
-
-                    p = norm.rvs(loc=0, scale=1)
-
-                    daily_amplitude = a_d[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    samples = np.vstack((np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                    pdf = np.exp(kde_d[month].score_samples(samples))
-
-                    iteration = 0
-                    if np.sum(pdf) == 0.0:
-
-                        while np.sum(pdf) == 0.0:
-
-                            p = norm.rvs(loc=0, scale=1)
-
-                            daily_amplitude = a_d[component,hour] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                            samples = np.vstack((np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                            pdf = np.exp(kde_d[month].score_samples(samples))
-
-                            iteration += 1
-                            if iteration > 1000:
-                                print('Too many iterations')
-                                break
-
-            # Update the daily value
-            if UpdateDaily_because_of_timelag and hour % timelag == 0:
-
-                UpdateDaily_because_of_timelag = False
-                samples = np.vstack((np.repeat(weights_daily_all[component,day-1],samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                pdf = np.exp(kde_d[month].score_samples(samples))
-                drift = KDE.kramer_moyal_coeff(weights_daily_all[component,day-1], value_interval_d[month,:], pdf, n=1, tau=1)
-                diffusion = KDE.kramer_moyal_coeff(weights_daily_all[component,day-1], value_interval_d[month,:], pdf, n=2, tau=1)
-
-                p = norm.rvs(loc=0, scale=1)
-
-                daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                samples = np.vstack((np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                pdf = np.exp(kde_d[month].score_samples(samples))
-
-                iteration = 0
-                if np.sum(pdf) == 0.0:
-
-                    while np.sum(pdf) == 0.0:
-
-                        p = norm.rvs(loc=0, scale=1)
-
-                        daily_amplitude = weights_daily_all[component,day-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                        samples = np.vstack((np.repeat(daily_amplitude,samplerate), np.linspace(min_value_d[month], max_value_d[month], samplerate))).T
-                        pdf = np.exp(kde_d[month].score_samples(samples))
-
-                        iteration += 1
-                        if iteration > 1000:
-                            print('Too many iterations')
-                            break
-
-            # Write the daily value to the daily amplitude array
-            a_d[component,hour] = daily_amplitude
-
-            ############################################################################
-            ################## MONTHLY PART ############################################
-            ############################################################################
-            if hour == hours_in_semi_month[semi_month]:
-                semi_month+= 1
-
-                if hour % timelag == 0:
-                    UpdateSemiMonthly_because_of_timelag = False
-                    samples = np.vstack((np.repeat(weights_monthly_all[component,semi_month-1],samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                    pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                    drift = KDE.kramer_moyal_coeff(weights_monthly_all[component,semi_month-1], value_intervals_m[month,:], pdf, n=1, tau=1)
-                    diffusion = KDE.kramer_moyal_coeff(weights_monthly_all[component,semi_month-1], value_intervals_m[month,:], pdf, n=2, tau=1)
-
-                    p = norm.rvs(loc=0, scale=1)
-
-                    semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    samples = np.vstack((np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                    pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                    # Check if we go out of bounds, then find a new random value which would bring us back.
-                    iteration = 0
-                    if np.sum(pdf) == 0.0:
-                        #print 'out', i
-                        while np.sum(pdf) == 0.0:
-
-                            p = norm.rvs(loc=0, scale=1)
-
-                            semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                            samples = np.vstack((np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                            pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                            iteration += 1
-                            if iteration > 1000:
-                                print('Too many iterations')
-                                break
-                else:
-                    UpdateSemiMonthly_because_of_timelag = True
-                    samples = np.vstack((np.repeat(a_m[component,hour-1],samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                    pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                    drift = KDE.kramer_moyal_coeff(a_m[component,hour-1], value_intervals_m[month,:], pdf, n=1, tau=1)
-                    diffusion = KDE.kramer_moyal_coeff(a_m[component,hour-1], value_intervals_m[month,:], pdf, n=2, tau=1)
-
-                    p = norm.rvs(loc=0, scale=1)
-
-                    semi_monthly_amplitude = a_m[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                    samples = np.vstack((np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                    pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                    # Check if we go out of bounds, then find a new random value which would bring us back.
-                    iteration = 0
-                    if np.sum(pdf) == 0.0:
-                        #print 'out', i
-                        while np.sum(pdf) == 0.0:
-
-                            p = norm.rvs(loc=0, scale=1)
-
-                            semi_monthly_amplitude = a_m[component,hour-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                            samples = np.vstack((np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                            pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                            iteration += 1
-                            if iteration > 1000:
-                                print('Too many iterations')
-                                break
-
-            if UpdateSemiMonthly_because_of_timelag and hour % timelag == 0:
-                UpdateSemiMonthly_because_of_timelag = False
-                samples = np.vstack((np.repeat(weights_monthly_all[component,semi_month-1],samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                drift = KDE.kramer_moyal_coeff(weights_monthly_all[component,semi_month-1], value_intervals_m[month,:], pdf, n=1, tau=1)
-                diffusion = KDE.kramer_moyal_coeff(weights_monthly_all[component,semi_month-1], value_intervals_m[month,:], pdf, n=2, tau=1)
-
-                p = norm.rvs(loc=0, scale=1)
-
-                semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                samples = np.vstack((np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                # Check if we go out of bounds, then find a new random value which would bring us back.
-                iteration = 0
-                if np.sum(pdf) == 0.0:
-                    #print 'out', i
-                    while np.sum(pdf) == 0.0:
-
-                        p = norm.rvs(loc=0, scale=1)
-
-                        semi_monthly_amplitude = weights_monthly_all[component,semi_month-1] + drift*tau + np.sqrt(diffusion*tau)*p
-
-                        samples = np.vstack((np.repeat(semi_monthly_amplitude,samplerate), np.linspace(min_values_m[month], max_values_m[month], samplerate))).T
-                        pdf = np.exp(kdes_m[month].score_samples(samples))
-
-                        iteration += 1
-                        if iteration > 1000:
-                            print('Too many iterations')
-                            break
-
-            a_m[component,hour] = semi_monthly_amplitude
-
-            print day,'Day'
-            print semi_month,'Semi-month'
-            print month,'Month'
-            print '------'
-
-
-
-
-def addTimeScalesTogethor(filename,StartMonth='Jan',N = 1,NumberOfComponents=1):
-    """
-    Add all generated timeseries together to create the final new mismatch file.
-    :param filename:
-    :param N:
-    :param NumberOfComponents:
-    :return:
-    """
-
-    # Load the data from a solved system
-    mismatch = loader.get_eu_mismatch_balancing_injection_meanload(filename)[0]
-
-    # Total number of days in the data [hours/24]
-    numberOfDays = mismatch.shape[1] / 24
-
-    # Center and normalize data, for use with PCA
-    mismatch_c, mean_mismatch = PCA.center(mismatch)
-    h, Ntilde = PCA.normalize(mismatch_c)
-
-    # N is the  number of hours
-    epsilon = np.zeros((NumberOfComponents,N+1))
-
-    # We have a network of 30 nodes, so the new mismatch needs to be 30xN+1
-    approx_mismatch = np.zeros((mismatch.shape[0],N+1))
-    days_in_month = createCumulativeSumOfDaysInData(StartMonth=StartMonth)[1][1::2]
-    for component in range(NumberOfComponents):
-
-        ################## CREATE THE NEW TIME SERIES ##################################
-        epsilon_m = np.load('results/'+'epsilon_m_full_k=' + str(component+1)+'.npy')
-        epsilon_d = np.load('results/'+'epsilon_d_full_k=' + str(component+1)+'.npy')
-        epsilon_h = np.load('results/'+'epsilon_h_full_k=' + str(component+1)+'.npy')
-
-        # Only pick out the number of half-months fitting with the number of generated data
-        # Extends the half-month series and daily series to hourly scale. - Skipping the start value
-        if len(epsilon_m) == 1:
-            semi_months = days_in_month[0]
-            e_m = np.repeat(epsilon_m,semi_months)
-        else:
-            semi_months = days_in_month[np.arange(0,len(epsilon_m)-1)]
-
-            e_m = np.repeat(epsilon_m[1::],semi_months)
-
-        if len(epsilon_d) == 1:
-            e_d = np.repeat(epsilon_d,24)
-        else:
-            e_d = np.repeat(epsilon_d[1::],24)
-
-        # Create the new total timeseries e = e_m + e_d + e_h
-        tau = 1
-        for i in np.arange(0, N, tau):
-
-            #print e_d[i]
-            #print epsilon_h[i]
-            epsilon[component,i] = e_m[i] + e_d[i] + epsilon_h[i+1] # The +1 is to skip the startvalue of epsilon_h
-
-
-        lambd, princ_comp = PCA.get_principal_component(h, component)
-        mismatch_PC = PCA.unnormalize_uncenter(princ_comp,Ntilde, mean_mismatch)
-
-        approx_mismatch += np.outer(mismatch_PC, epsilon[component,:])
-
-    filename = 'weights_generated.npy'
-    np.save('approx_mismatch_generated'+'.npy',approx_mismatch)
-    np.save(filename, epsilon)
 
 def getIndexOfStartMonth(StartMonth='Jan'):
 
